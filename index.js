@@ -76,7 +76,7 @@ app.set('connectedUsers', connectedUsers);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cors({
-    origin: process.env.CLIENT_URL || "http://localhost:5173",
+    origin: allowedOrigins,
     credentials: true
 }));
 app.use(compression()); // Added
@@ -98,3 +98,4 @@ const PORT = process.env.PORT || 5100;
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 // Restart server to load .env changes
 
+export default app;
