@@ -27,19 +27,34 @@ const app = express();
 
 // Create HTTP server and Socket.IO
 const server = createServer(app);
-
 const allowedOrigins = [
     process.env.CLIENT_URL,
     "http://localhost:5173",
     "https://blog-frontend-one-omega.vercel.app"
 ].filter(Boolean);
 
+const corsOptions = {
+    origin: (origin, callback) => {
+        // Allow requests with no origin (like mobile apps or curl)
+        if (!origin) return callback(null, true);
+
+        const isAllowed = allowedOrigins.some(allowed =>
+            allowed.replace(/\/$/, '') === origin.replace(/\/$/, '')
+        );
+
+        if (isAllowed || origin.endsWith('.vercel.app')) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"]
+};
+
 const io = new Server(server, {
-    cors: {
-        origin: allowedOrigins,
-        methods: ["GET", "POST"],
-        credentials: true
-    }
+    cors: corsOptions
 });
 
 // Store connected users
@@ -75,10 +90,7 @@ app.set('connectedUsers', connectedUsers);
 // Middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(cors({
-    origin: allowedOrigins,
-    credentials: true
-}));
+app.use(cors(corsOptions));
 app.use(compression()); // Added
 
 // Routes
@@ -96,6 +108,5 @@ app.get('/', (req, res) => {
 const PORT = process.env.PORT || 5100;
 
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-// Restart server to load .env changes
 
 export default app;
