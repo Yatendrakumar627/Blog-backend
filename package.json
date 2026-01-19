@@ -6,8 +6,12 @@
   "type": "module",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
+<<<<<<< HEAD
     "dev": "nodemon index.js",
     "start": "node index.js"
+=======
+    "dev": "nodemon index.js"
+>>>>>>> 6e17f64bdf4d9035de8c98e4477237c68f177673
   },
   "keywords": [],
   "author": "",
@@ -28,4 +32,8 @@
     "redis": "^5.10.0",
     "socket.io": "^4.8.3"
   }
+<<<<<<< HEAD
 }
+=======
+}
+>>>>>>> 6e17f64bdf4d9035de8c98e4477237c68f177673
