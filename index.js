@@ -219,7 +219,9 @@ app.get('/api/proxy', async (req, res) => {
             'avatars.githubusercontent.com',
             'upload.wikimedia.org',
             'blog-frontend-one-omega.vercel.app',
-            'blog-backend-1-5enc.onrender.com'
+            'blog-backend-1-5enc.onrender.com',
+            'i.pinimg.com',
+            'pinterest.com'
         ];
 
         const isAllowedDomain = allowedDomains.some(domain => 
