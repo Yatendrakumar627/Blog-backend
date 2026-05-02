@@ -208,7 +208,7 @@ app.get('/api/proxy', async (req, res) => {
             return res.status(403).json({ message: 'Access to internal resources is not allowed' });
         }
 
-        // Only allow known image CDN domains
+        // Only allow known image CDN domains and the app's own domains
         const allowedDomains = [
             'res.cloudinary.com',
             'images.unsplash.com',
@@ -218,10 +218,16 @@ app.get('/api/proxy', async (req, res) => {
             'lh3.googleusercontent.com',
             'avatars.githubusercontent.com',
             'upload.wikimedia.org',
+            'blog-frontend-one-omega.vercel.app',
+            'blog-backend-1-5enc.onrender.com'
         ];
 
-        if (!allowedDomains.some(domain => hostname === domain || hostname.endsWith('.' + domain))) {
-            return res.status(403).json({ message: 'Domain not allowed for proxying' });
+        const isAllowedDomain = allowedDomains.some(domain => 
+            hostname === domain || hostname.endsWith('.' + domain)
+        ) || hostname.endsWith('.vercel.app');
+
+        if (!isAllowedDomain) {
+            return res.status(403).json({ message: `Domain ${hostname} not allowed for proxying` });
         }
 
         const response = await fetch(url);
