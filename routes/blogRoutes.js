@@ -27,7 +27,7 @@ router.route('/')
     .get(protect, getBlogs);
 
 router.route('/:id')
-    .get(protect, getBlogById)
+    .get(optionalProtect, getBlogById)
     .delete(protect, deleteBlog)
     .put(protect, (req, res, next) => {
         upload.single('image')(req, res, (err) => {

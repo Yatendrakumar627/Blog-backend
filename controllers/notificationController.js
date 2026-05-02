@@ -66,7 +66,7 @@ export const markAllRead = async (req, res) => {
 };
 
 // Internal Helper to create notification
-export const createNotification = async (recipientId, senderId, type, blogId = null, io = null) => {
+export const createNotification = async (recipientId, senderId, type, blogId = null, io = null, reactionText = null) => {
     try {
         if (recipientId.toString() === senderId.toString()) return;
 
@@ -76,6 +76,7 @@ export const createNotification = async (recipientId, senderId, type, blogId = n
         // Check if user has disabled this type of notification
         const settings = recipient.notificationSettings || {};
         if (type === 'like' && settings.likeNotifications === false) return;
+        if (type === 'reaction' && settings.likeNotifications === false) return;
         if (type === 'comment' && settings.commentNotifications === false) return;
         if (type === 'follow' && settings.followNotifications === false) return;
 
@@ -83,7 +84,8 @@ export const createNotification = async (recipientId, senderId, type, blogId = n
             recipient: recipientId,
             sender: senderId,
             type,
-            blog: blogId
+            blog: blogId,
+            text: reactionText // Reuse text field for reaction type name if needed
         });
 
         // Populate notification data for real-time sending

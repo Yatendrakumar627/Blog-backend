@@ -1,5 +1,5 @@
 import express from 'express';
-import { registerUser, loginUser, getProfile, followUser, unfollowUser, getUserById, getPublicUser, getProfileUser, searchUsers, getUserNetwork, updateProfile, checkUsernameAvailability, checkEmailAvailability, deleteAccount, updateNotificationSettings, updatePrivacySettings, changePassword, updateEmail } from '../controllers/authController.js';
+import { registerUser, loginUser, getProfile, followUser, unfollowUser, getUserById, getPublicUser, getProfileUser, searchUsers, getUserNetwork, updateProfile, checkUsernameAvailability, checkEmailAvailability, deleteAccount, updateNotificationSettings, updatePrivacySettings, changePassword, updateEmail, forgotPassword, resetPassword } from '../controllers/authController.js';
 import { protect, optionalProtect } from '../middleware/authMiddleware.js';
 import upload from '../config/cloudinary.js';
 
@@ -7,6 +7,8 @@ const router = express.Router();
 
 router.post('/register', registerUser);
 router.post('/login', loginUser);
+router.post('/forgot-password', forgotPassword);
+router.post('/reset-password', resetPassword);
 router.get('/check-username/:username', checkUsernameAvailability);
 router.get('/check-email/:email', checkEmailAvailability);
 router.put('/:id/follow', protect, followUser);

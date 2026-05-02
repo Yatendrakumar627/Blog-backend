@@ -17,6 +17,85 @@ const generateToken = (id) => {
     });
 };
 
+// @desc    Forgot password — generate reset token
+// @route   POST /api/auth/forgot-password
+// @access  Public
+export const forgotPassword = async (req, res) => {
+    try {
+        const { email } = req.body;
+        if (!email) {
+            return res.status(400).json({ message: 'Email is required' });
+        }
+
+        const user = await User.findOne({ email });
+        if (!user) {
+            // Don't reveal if email exists (security best practice)
+            return res.json({ message: 'If this email is registered, you will receive a reset link.' });
+        }
+
+        // Generate a short-lived reset token (15 minutes)
+        const resetToken = jwt.sign(
+            { id: user._id, purpose: 'password-reset' },
+            process.env.JWT_SECRET,
+            { expiresIn: '15m' }
+        );
+
+        // In production, send this via email (Nodemailer + SendGrid/Mailgun)
+        // For now, return the token directly for testing
+        // TODO: Integrate email service
+        // const resetUrl = `${process.env.CLIENT_URL}/reset-password?token=${resetToken}`;
+        // await sendResetEmail(user.email, resetUrl);
+
+        res.json({ message: 'If this email is registered, you will receive a reset link.', resetToken });
+    } catch (error) {
+        console.error('Forgot password error:', error);
+        res.status(500).json({ message: 'Something went wrong. Please try again.' });
+    }
+};
+
+// @desc    Reset password with token
+// @route   POST /api/auth/reset-password
+// @access  Public
+export const resetPassword = async (req, res) => {
+    try {
+        const { token, newPassword } = req.body;
+        if (!token || !newPassword) {
+            return res.status(400).json({ message: 'Token and new password are required' });
+        }
+
+        if (newPassword.length < 6) {
+            return res.status(400).json({ message: 'Password must be at least 6 characters' });
+        }
+
+        // Verify the reset token
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        if (decoded.purpose !== 'password-reset') {
+            return res.status(400).json({ message: 'Invalid reset token' });
+        }
+
+        const user = await User.findById(decoded.id);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        // Hash and save new password
+        const salt = await bcrypt.genSalt(10);
+        user.password = await bcrypt.hash(newPassword, salt);
+        await user.save();
+
+        res.json({ message: 'Password reset successful. You can now login with your new password.' });
+    } catch (error) {
+        if (error.name === 'TokenExpiredError') {
+            return res.status(400).json({ message: 'Reset link has expired. Please request a new one.' });
+        }
+        if (error.name === 'JsonWebTokenError') {
+            return res.status(400).json({ message: 'Invalid reset token' });
+        }
+        console.error('Reset password error:', error);
+        res.status(500).json({ message: 'Something went wrong. Please try again.' });
+    }
+};
+
 export const checkUsernameAvailability = async (req, res) => {
     try {
         const { username } = req.params;
@@ -857,6 +936,7 @@ export const changePassword = async (req, res) => {
 // @route   DELETE /api/auth/profile
 // @access  Private
 export const deleteAccount = async (req, res) => {
+    const session = await mongoose.startSession();
     try {
         const user = await User.findById(req.user._id);
 
@@ -864,7 +944,8 @@ export const deleteAccount = async (req, res) => {
             return res.status(404).json({ message: 'User not found' });
         }
 
-        // 1. Delete all posts by this user
+        // --- Cloudinary Cleanup (external, non-transactional) ---
+        // Do this BEFORE the transaction since we can't rollback cloud deletions
         const userBlogs = await Blog.find({ author: user._id });
 
         // Delete post images from Cloudinary
@@ -873,61 +954,72 @@ export const deleteAccount = async (req, res) => {
             .map(blog => {
                 const publicId = getPublicIdFromUrl(blog.mediaUrl);
                 if (publicId) {
-                    return cloudinary.uploader.destroy(publicId);
+                    return cloudinary.uploader.destroy(publicId).catch(() => {});
                 }
                 return Promise.resolve();
             });
 
         await Promise.all(blogImageDeletionPromises);
 
-        // Delete blogs from DB
-        await Blog.deleteMany({ author: user._id });
-
-        // 2. Delete Profile Picture from Cloudinary
+        // Delete Profile Picture from Cloudinary
         if (user.profilePic && user.profilePic.includes('cloudinary')) {
             const profilePicId = getPublicIdFromUrl(user.profilePic);
             if (profilePicId) {
-                await cloudinary.uploader.destroy(profilePicId);
+                await cloudinary.uploader.destroy(profilePicId).catch(() => {});
             }
         }
 
-        // 3. Delete Comments by user
-        await Comment.deleteMany({ author: user._id });
+        // --- Database Cleanup (transactional) ---
+        session.startTransaction();
 
-        // 4. Delete Notifications (sent to or by the user)
-        // Cleanup notifications where user is recipient or sender
-        await Notification.deleteMany({ $or: [{ recipient: user._id }, { sender: user._id }] });
+        // 1. Delete blogs from DB
+        await Blog.deleteMany({ author: user._id }, { session });
 
-        // 5. Remove user from followers/following lists of others
-        // Remove user from other users' followers list
+        // 2. Delete Comments by user
+        await Comment.deleteMany({ author: user._id }, { session });
+
+        // 3. Delete Notifications (sent to or by the user)
+        await Notification.deleteMany({ $or: [{ recipient: user._id }, { sender: user._id }] }, { session });
+
+        // 4. Remove user from followers/following lists of others
         await User.updateMany(
             { followers: user._id },
-            { $pull: { followers: user._id } }
+            { $pull: { followers: user._id } },
+            { session }
         );
-        // Remove user from other users' following list
         await User.updateMany(
             { following: user._id },
-            { $pull: { following: user._id } }
+            { $pull: { following: user._id } },
+            { session }
         );
 
-        // 6. Delete Conversations and Messages
-        // Delete all conversations where user was a participant
+        // 5. Delete Conversations and Messages
         await Conversation.deleteMany({
             participants: { $in: [user._id] }
-        });
+        }, { session });
 
-        // Delete all messages sent by or to the user
         await Message.deleteMany({
             $or: [{ sender: user._id }, { recipient: user._id }]
-        });
+        }, { session });
 
-        // 7. Delete User
-        await User.findByIdAndDelete(user._id);
+        // 6. Delete User
+        await User.findByIdAndDelete(user._id, { session });
+
+        await session.commitTransaction();
+
+        // Notify connected clients about user deletion
+        const io = req.app.get('io');
+        if (io) {
+            io.emit('user_deleted', user._id);
+        }
 
         res.json({ message: 'Account deleted successfully' });
     } catch (error) {
+        await session.abortTransaction();
         console.error('Delete account error:', error);
         res.status(500).json({ message: error.message });
+    } finally {
+        session.endSession();
     }
 };
 

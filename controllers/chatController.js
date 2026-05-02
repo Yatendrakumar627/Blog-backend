@@ -370,15 +370,6 @@ export const getTrashedConversations = async (req, res) => {
             const hasNewMessages = conv.lastMessage &&
                 new Date(conv.lastMessage.createdAt) > new Date(userDeletion.deletedAt);
 
-            console.log('Trash conversation debug:', {
-                conversationId: conv._id,
-                lastMessage: conv.lastMessage,
-                lastMessageText: conv.lastMessage?.text,
-                lastMessageSender: conv.lastMessage?.sender,
-                userDeletionDate: userDeletion?.deletedAt,
-                hasNewMessages
-            });
-
             return {
                 ...conv.toObject(),
                 hasNewMessages

@@ -17,6 +17,7 @@ import cleanupRoutes from './routes/cleanupRoutes.js';
 
 import { setupCronJobs } from './utils/cronJobs.js';
 import { connectRedis } from './config/redis.js';
+import rateLimit from 'express-rate-limit';
 
 dotenv.config();
 
@@ -140,6 +141,29 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(compression());
 
+// Rate limiting - General API limiter
+const apiLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 1000, // Increased from 100 to 1000 to prevent lockouts during normal SPA usage/development
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { message: 'Too many requests, please try again later.' }
+});
+
+// Strict rate limiter for auth endpoints (login/register)
+const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 30, // Increased from 15 to 30 for better development experience
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { message: 'Too many login attempts, please try again after 15 minutes.' }
+});
+
+// Apply rate limiters
+app.use('/api/', apiLimiter);
+app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/register', authLimiter);
+
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/blogs', blogRoutes);
@@ -148,6 +172,84 @@ app.use('/api/interactions', interactionRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/cleanup', cleanupRoutes);
+app.get('/api/proxy', async (req, res) => {
+    try {
+        const url = req.query.url;
+        if (!url) return res.status(400).json({ message: 'No URL provided' });
+
+        // Validate URL format
+        let parsedUrl;
+        try {
+            parsedUrl = new URL(url);
+        } catch {
+            return res.status(400).json({ message: 'Invalid URL format' });
+        }
+
+        // Only allow HTTPS (and HTTP for development)
+        if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+            return res.status(400).json({ message: 'Only HTTP/HTTPS URLs are allowed' });
+        }
+
+        // Block internal/private IP ranges to prevent SSRF
+        const hostname = parsedUrl.hostname;
+        const blockedPatterns = [
+            /^localhost$/i,
+            /^127\./,
+            /^10\./,
+            /^172\.(1[6-9]|2\d|3[01])\./,
+            /^192\.168\./,
+            /^169\.254\./,    // AWS metadata
+            /^0\./,
+            /^\[::1\]/,       // IPv6 localhost
+            /^metadata\./i,   // Cloud metadata endpoints
+        ];
+
+        if (blockedPatterns.some(pattern => pattern.test(hostname))) {
+            return res.status(403).json({ message: 'Access to internal resources is not allowed' });
+        }
+
+        // Only allow known image CDN domains
+        const allowedDomains = [
+            'res.cloudinary.com',
+            'images.unsplash.com',
+            'i.imgur.com',
+            'cdn.pixabay.com',
+            'images.pexels.com',
+            'lh3.googleusercontent.com',
+            'avatars.githubusercontent.com',
+            'upload.wikimedia.org',
+        ];
+
+        if (!allowedDomains.some(domain => hostname === domain || hostname.endsWith('.' + domain))) {
+            return res.status(403).json({ message: 'Domain not allowed for proxying' });
+        }
+
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`Failed to fetch image: ${response.statusText}`);
+        
+        const contentType = response.headers.get('content-type') || '';
+        // Only allow image content types
+        if (!contentType.startsWith('image/')) {
+            return res.status(400).json({ message: 'Only image content is allowed through proxy' });
+        }
+
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+
+        // Limit response size to 10MB
+        if (buffer.length > 10 * 1024 * 1024) {
+            return res.status(413).json({ message: 'Image too large (max 10MB)' });
+        }
+        
+        res.set('Content-Type', contentType);
+        res.set('Access-Control-Allow-Origin', '*');
+        res.set('Cache-Control', 'public, max-age=31536000');
+        res.send(buffer);
+    } catch (e) {
+        res.status(500).json({ message: 'Proxy error' });
+    }
+});
+
 app.get('/', (req, res) => {
     res.send('API is running...');
 });

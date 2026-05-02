@@ -5,18 +5,31 @@ import Interaction from '../models/Interaction.js';
 import User from '../models/User.js';
 import { v2 as cloudinary } from 'cloudinary';
 import mongoose from 'mongoose';
+import sanitizeHtml from 'sanitize-html';
 
 import { getCache, setCache, delCache } from '../config/redis.js';
+
+// Server-side HTML sanitization config
+const sanitizeOptions = {
+    allowedTags: sanitizeHtml.defaults.allowedTags.concat(['img', 'h1', 'h2', 'span', 'u', 'del', 's', 'sub', 'sup', 'hr']),
+    allowedAttributes: {
+        ...sanitizeHtml.defaults.allowedAttributes,
+        '*': ['style', 'class'],
+        'a': ['href', 'target', 'rel'],
+        'img': ['src', 'alt', 'width', 'height'],
+    },
+    allowedSchemes: ['http', 'https', 'mailto'],
+};
 
 // @desc    Create a new blog
 // @route   POST /api/blogs
 // @access  Private
 export const createBlog = async (req, res) => {
     try {
-        console.log('Request body:', req.body);
-        console.log('Request file:', req.file);
-
         const { content, tags, mood, displayMode, isAnonymous, mediaUrl: bodyMediaUrl, backgroundImage: bodyBackgroundImage } = req.body;
+
+        // Sanitize HTML content before storage
+        const sanitizedContent = sanitizeHtml(content || '', sanitizeOptions);
 
         // Priority: 1. Multer File Path (Cloudinary URL), 2. Explicitly sent URL
         let mediaUrl = '';
@@ -28,7 +41,7 @@ export const createBlog = async (req, res) => {
 
         const blog = new Blog({
             author: req.user._id,
-            content,
+            content: sanitizedContent,
             mediaUrl,
             backgroundImage: bodyBackgroundImage || '',
             tags: tags ? tags.split(',').map(tag => tag.trim()) : [],
@@ -45,13 +58,13 @@ export const createBlog = async (req, res) => {
             blogObj.author.isOnline = true;
         }
 
-        // Invalidate feed cache
-        await delCache('blogs:feed:*');
+        // Invalidate only page 1 discover feeds (most visible) instead of all feeds
+        await delCache('blogs:feed:*page*:*1*');
 
         res.status(201).json(blogObj);
     } catch (error) {
-        console.error('FULL BLOG ERROR:', error);
-        res.status(500).json({ message: error.message, stack: error.stack });
+        console.error('Create blog error:', error);
+        res.status(500).json({ message: error.message });
     }
 };
 
@@ -182,20 +195,26 @@ export const getBlogs = async (req, res) => {
 
         const connectedUsers = req.app.get('connectedUsers') || new Map();
 
-        // Enhance blogs with online status and comment counts
-        const blogsWithStatus = await Promise.all(blogs.map(async (blog) => {
+        // Batch fetch comment counts in ONE query instead of N individual queries
+        const blogIds = blogs.map(b => b._id);
+        const commentCounts = await Comment.aggregate([
+            { $match: { blog: { $in: blogIds } } },
+            { $group: { _id: '$blog', count: { $sum: 1 } } }
+        ]);
+        const commentCountMap = new Map(commentCounts.map(c => [c._id.toString(), c.count]));
+
+        // Enhance blogs with online status and pre-fetched comment counts
+        const blogsWithStatus = blogs.map((blog) => {
             if (blog.author && typeof blog.author === 'object') {
                 const isSocketConnected = connectedUsers.has(blog.author._id.toString());
                 const isOnline = isSocketConnected && (blog.author.privacySettings?.showOnlineStatus !== false);
                 blog.author.isOnline = isOnline;
             }
 
-            // Get comment count efficiently
-            const commentsCount = await Comment.countDocuments({ blog: blog._id });
-            blog.commentsCount = commentsCount;
+            blog.commentsCount = commentCountMap.get(blog._id.toString()) || 0;
 
             return blog;
-        }));
+        });
 
         const responseData = {
             blogs: blogsWithStatus,
@@ -246,27 +265,52 @@ export const getBlogById = async (req, res) => {
 // @access  Private
 export const likeBlog = async (req, res) => {
     try {
+        const { reactionType } = req.body; // 'I feel this', 'Sending hugs', 'Resonates', 'Snaps'
         const blog = await Blog.findById(req.params.id);
         const io = req.app.get('io');
         if (!blog) return res.status(404).json({ message: 'Blog not found' });
 
-        if (blog.likes.includes(req.user._id)) {
-            // Unlike
-            blog.likes = blog.likes.filter((id) => id.toString() !== req.user._id.toString());
+        const userId = req.user._id.toString();
+        
+        // Initialize reactions if it doesn't exist (for older posts)
+        if (!blog.reactions) blog.reactions = [];
+
+        // Check if user already reacted
+        const existingReactionIndex = blog.reactions.findIndex(r => r.user.toString() === userId);
+
+        if (existingReactionIndex !== -1) {
+            const existingReaction = blog.reactions[existingReactionIndex];
+            
+            if (existingReaction.type === reactionType || !reactionType) {
+                // Toggle off (Unlike/Unreact) if it's the same type or no type provided
+                blog.reactions.splice(existingReactionIndex, 1);
+                blog.likes = blog.likes.filter(id => id.toString() !== userId);
+            } else {
+                // Change reaction type
+                existingReaction.type = reactionType;
+                // Ensure in likes array for easy counting
+                if (!blog.likes.some(id => id.toString() === userId)) {
+                    blog.likes.push(req.user._id);
+                }
+            }
         } else {
-            // Like
-            blog.likes.push(req.user._id);
-            await createNotification(blog.author, req.user._id, 'like', blog._id, io);
+            // New reaction
+            const type = reactionType || 'I feel this';
+            blog.reactions.push({ user: req.user._id, type });
+            
+            if (!blog.likes.some(id => id.toString() === userId)) {
+                blog.likes.push(req.user._id);
+            }
+            
+            // Create notification for reaction
+            await createNotification(blog.author, req.user._id, 'reaction', blog._id, io, type);
         }
+
         await blog.save();
 
-        // Invalidate feed cache as likes count changed
-        // Note: For high performance, we might skip this and let it update on 60s TTL, 
-        // but for correctness/UX we invalidate.
-        await delCache('blogs:feed:*');
-
-        res.json(blog.likes);
+        res.json({ likes: blog.likes, reactions: blog.reactions });
     } catch (error) {
+        console.error('Reaction error:', error);
         res.status(500).json({ message: error.message });
     }
 };
@@ -409,7 +453,7 @@ export const updateBlog = async (req, res) => {
             }
         }
 
-        blog.content = content || blog.content;
+        blog.content = content ? sanitizeHtml(content, sanitizeOptions) : blog.content;
         blog.mood = mood || blog.mood;
         blog.displayMode = displayMode || blog.displayMode;
         blog.isAnonymous = isAnonymous === 'true' || isAnonymous === true ? true : (isAnonymous === 'false' || isAnonymous === false ? false : blog.isAnonymous);
