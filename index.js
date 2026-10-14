@@ -5,6 +5,7 @@ import cors from 'cors';
 import compression from 'compression';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
+import dns from 'dns';
 import connectDB from './config/db.js';
 import authRoutes from './routes/authRoutes.js';
 import blogRoutes from './routes/blogRoutes.js';
@@ -174,6 +175,47 @@ app.use('/api/interactions', interactionRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/cleanup', cleanupRoutes);
+// SSRF Protection Helpers
+const isPrivateIp = (ip) => {
+    if (!ip) return true;
+    if (/^127\./.test(ip)) return true; // Loopback
+    if (/^10\./.test(ip)) return true; // Class A private
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return true; // Class B private
+    if (/^192\.168\./.test(ip)) return true; // Class C private
+    if (/^169\.254\./.test(ip)) return true; // Link-local / metadata
+    if (/^0\./.test(ip)) return true;
+    if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(ip)) return true; // CGNAT
+    if (/^198\.(1[89])\./.test(ip)) return true;
+    if (ip === '255.255.255.255') return true;
+
+    // IPv6 private & special
+    if (ip === '::1' || ip === '::') return true;
+    if (/^fe80:/i.test(ip)) return true;
+    if (/^f[cd][0-9a-f]{2}:/i.test(ip)) return true;
+
+    return false;
+};
+
+const isBlockedHostname = (hostname) => {
+    const blockedPatterns = [
+        /^localhost$/i,
+        /^127\./,
+        /^10\./,
+        /^172\.(1[6-9]|2\d|3[01])\./,
+        /^192\.168\./,
+        /^169\.254\./,
+        /^0\./,
+        /^\[::1\]/,
+        /^metadata\./i,
+        /\.local$/i,
+        /\.internal$/i,
+        /\.lan$/i,
+        /\.corp$/i,
+        /\.home$/i
+    ];
+    return blockedPatterns.some(pattern => pattern.test(hostname));
+};
+
 app.get('/api/proxy', async (req, res) => {
     try {
         const url = req.query.url;
@@ -187,60 +229,53 @@ app.get('/api/proxy', async (req, res) => {
             return res.status(400).json({ message: 'Invalid URL format' });
         }
 
-        // Only allow HTTPS (and HTTP for development)
+        // Only allow HTTP/HTTPS URLs
         if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
             return res.status(400).json({ message: 'Only HTTP/HTTPS URLs are allowed' });
         }
 
-        // Block internal/private IP ranges to prevent SSRF
-        const hostname = parsedUrl.hostname;
-        const blockedPatterns = [
-            /^localhost$/i,
-            /^127\./,
-            /^10\./,
-            /^172\.(1[6-9]|2\d|3[01])\./,
-            /^192\.168\./,
-            /^169\.254\./,    // AWS metadata
-            /^0\./,
-            /^\[::1\]/,       // IPv6 localhost
-            /^metadata\./i,   // Cloud metadata endpoints
-        ];
+        // Only allow standard HTTP/HTTPS ports to prevent port scanning attacks
+        if (parsedUrl.port && parsedUrl.port !== '80' && parsedUrl.port !== '443') {
+            return res.status(403).json({ message: 'Invalid port for proxying' });
+        }
 
-        if (blockedPatterns.some(pattern => pattern.test(hostname))) {
+        const hostname = parsedUrl.hostname;
+
+        // Block internal/private hostnames to prevent SSRF
+        if (isBlockedHostname(hostname)) {
             return res.status(403).json({ message: 'Access to internal resources is not allowed' });
         }
 
-        // Only allow known image CDN domains and the app's own domains
-        const allowedDomains = [
-            'res.cloudinary.com',
-            'images.unsplash.com',
-            'i.imgur.com',
-            'cdn.pixabay.com',
-            'images.pexels.com',
-            'lh3.googleusercontent.com',
-            'avatars.githubusercontent.com',
-            'upload.wikimedia.org',
-            'blog-frontend-one-omega.vercel.app',
-            'blog-backend-1-5enc.onrender.com',
-            'i.pinimg.com',
-            'pinterest.com'
-        ];
-
-        const isAllowedDomain = allowedDomains.some(domain => 
-            hostname === domain || hostname.endsWith('.' + domain)
-        ) || hostname.endsWith('.vercel.app') || hostname.endsWith('.onrender.com');
-
-        if (!isAllowedDomain) {
-            return res.status(403).json({ message: `Domain ${hostname} not allowed for proxying` });
+        // Resolve domain name to verify target IP is not private or local (SSRF protection)
+        try {
+            const { address } = await dns.promises.lookup(hostname);
+            if (isPrivateIp(address)) {
+                return res.status(403).json({ message: 'Access to private IP addresses is not allowed' });
+            }
+        } catch {
+            return res.status(400).json({ message: 'Could not resolve domain name' });
         }
 
-        const response = await fetch(url, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'image/*'
-            }
-        });
-        if (!response.ok) throw new Error(`Failed to fetch image: ${response.statusText}`);
+        // Fetch image with timeout
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+        let response;
+        try {
+            response = await fetch(url, {
+                signal: controller.signal,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
+                }
+            });
+        } finally {
+            clearTimeout(timeoutId);
+        }
+
+        if (!response.ok) {
+            return res.status(response.status).json({ message: `Failed to fetch image: ${response.statusText}` });
+        }
         
         const contentType = response.headers.get('content-type') || '';
         // Only allow image content types
@@ -258,9 +293,12 @@ app.get('/api/proxy', async (req, res) => {
         
         res.set('Content-Type', contentType);
         res.set('Access-Control-Allow-Origin', '*');
-        res.set('Cache-Control', 'public, max-age=31536000');
+        res.set('Cache-Control', 'public, max-age=31536000, immutable');
         res.send(buffer);
     } catch (e) {
+        if (e.name === 'AbortError') {
+            return res.status(504).json({ message: 'Proxy request timed out' });
+        }
         res.status(500).json({ message: 'Proxy error' });
     }
 });
