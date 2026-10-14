@@ -32,18 +32,28 @@ export const createBlog = async (req, res) => {
         const sanitizedContent = sanitizeHtml(content || '', sanitizeOptions);
 
         // Priority: 1. Multer File Path (Cloudinary URL), 2. Explicitly sent URL
+        const imageFile = req.files?.image?.[0] || req.file;
+        const bgFile = req.files?.backgroundImage?.[0];
+
         let mediaUrl = '';
-        if (req.file) {
-            mediaUrl = req.file.path;
+        if (imageFile) {
+            mediaUrl = imageFile.path;
         } else if (bodyMediaUrl) {
             mediaUrl = bodyMediaUrl;
+        }
+
+        let backgroundImage = '';
+        if (bgFile) {
+            backgroundImage = bgFile.path;
+        } else if (bodyBackgroundImage) {
+            backgroundImage = bodyBackgroundImage;
         }
 
         const blog = new Blog({
             author: req.user._id,
             content: sanitizedContent,
             mediaUrl,
-            backgroundImage: bodyBackgroundImage || '',
+            backgroundImage,
             tags: tags ? tags.split(',').map(tag => tag.trim()) : [],
             mood: mood || 'Thoughtful',
             displayMode: displayMode || 'Standard',
@@ -417,17 +427,18 @@ export const updateBlog = async (req, res) => {
         // 3. If neither -> keep existing (unless user explicitly cleared it, handled by frontend sending empty string in bodyMediaUrl maybe? 
         //    Actually for now let's say if bodyMediaUrl is explicitly passed as empty string, it clears.
 
+        const imageFile = req.files?.image?.[0] || req.file;
+        const bgFile = req.files?.backgroundImage?.[0];
+
         let mediaUrl = blog.mediaUrl;
         let oldMediaUrl = blog.mediaUrl;
         let shouldDeleteOldImage = false;
 
-        if (req.file) {
-            mediaUrl = req.file.path;
+        if (imageFile) {
+            mediaUrl = imageFile.path;
             shouldDeleteOldImage = true;
         } else if (bodyMediaUrl !== undefined) {
             // If bodyMediaUrl is sent (even empty), we update to it. 
-            // If it's string 'null' or 'undefined' from formData strings, handle that?
-            // Usually formData sends strings.
             if (bodyMediaUrl === 'null' || bodyMediaUrl === '') {
                 mediaUrl = '';
                 shouldDeleteOldImage = true;
@@ -458,14 +469,16 @@ export const updateBlog = async (req, res) => {
         blog.displayMode = displayMode || blog.displayMode;
         blog.isAnonymous = isAnonymous === 'true' || isAnonymous === true ? true : (isAnonymous === 'false' || isAnonymous === false ? false : blog.isAnonymous);
 
-        if (tags) {
-            blog.tags = tags.split(',').map(tag => tag.trim());
+        if (tags !== undefined) {
+            blog.tags = typeof tags === 'string' ? tags.split(',').map(tag => tag.trim()).filter(Boolean) : (Array.isArray(tags) ? tags : []);
         }
 
         blog.mediaUrl = mediaUrl;
 
-        // Handle background image
-        if (bodyBackgroundImage !== undefined) {
+        // Handle background image (file upload or URL)
+        if (bgFile) {
+            blog.backgroundImage = bgFile.path;
+        } else if (bodyBackgroundImage !== undefined) {
             blog.backgroundImage = (bodyBackgroundImage === 'null' || bodyBackgroundImage === '') ? '' : bodyBackgroundImage;
         }
 

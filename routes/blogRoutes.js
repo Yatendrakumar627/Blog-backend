@@ -14,9 +14,14 @@ import upload from '../config/cloudinary.js';
 
 const router = express.Router();
 
+const blogUpload = upload.fields([
+    { name: 'image', maxCount: 1 },
+    { name: 'backgroundImage', maxCount: 1 }
+]);
+
 router.route('/')
     .post(protect, (req, res, next) => {
-        upload.single('image')(req, res, (err) => {
+        blogUpload(req, res, (err) => {
             if (err) {
                 console.error('Multer/Cloudinary Error:', err);
                 return res.status(500).json({ message: 'Image upload failed', error: err.message });
@@ -30,7 +35,7 @@ router.route('/:id')
     .get(optionalProtect, getBlogById)
     .delete(protect, deleteBlog)
     .put(protect, (req, res, next) => {
-        upload.single('image')(req, res, (err) => {
+        blogUpload(req, res, (err) => {
             if (err) {
                 console.error('Multer/Update Error:', err);
                 return res.status(500).json({ message: 'Image upload failed', error: err.message });
